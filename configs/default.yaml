@@ -1,0 +1,27 @@
+# Default run configuration.
+#
+# Thresholds are the §1.1/§4.3 defaults. lambda_div is a placeholder until
+# transform.score.tune_lambda fits it on dev (§4.4: "Set λ high. If the system
+# performs well on D_train and poorly on D_heldout, λ is too low.").
+
+tau_sem: 0.85
+tau_register: 0.80
+entity_threshold: 1.00
+fluency_quantile: 0.95
+
+n_candidates: 12
+beam_width: 5
+max_iterations: 3
+lambda_div: 1.0
+search_strategy: beam
+
+n_dev: 2000
+n_test: 5000
+n_ref_human: 50000
+min_docs_per_genre: 3000
+min_own_generated_in_test: 1000
+
+seed: 0
+resident_model_cap: 2
+disk_budget_gb: 12.0
+device: mps
