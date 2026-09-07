@@ -49,6 +49,8 @@ VERIFIED_LOADABLE: frozenset[str] = frozenset(
         "sentence-transformers/eli5",
         "euclaise/writingprompts",
         "martinsr/wi_locness",
+        "tcapelle/feedback-prize-english-language-learning-fluency",
+        "srky/ICNALE_writing_score",
     }
 )
 
@@ -66,6 +68,21 @@ KNOWN_SYNTHETIC: frozenset[str] = frozenset(
         "Open-Orca/OpenOrca",
         "yahma/alpaca-cleaned",
         "tatsu-lab/alpaca",
+    }
+)
+
+
+#: Ids vetted as consisting of writing by non-native speakers of English. The
+#: §2.2 partition may draw only from these. An allowlist rather than a rule,
+#: because "is this corpus non-native writing?" is a question about how the
+#: data was collected and cannot be inferred from the rows.
+LEARNER_CORPORA: frozenset[str] = frozenset(
+    {
+        "martinsr/wi_locness",  # BEA-2019 W&I: exam essays, CEFR-banded
+        # ELLIPSE: US 8th-12th grade English Language Learners, six rubric
+        # dimensions scored 1-5 by trained raters.
+        "tcapelle/feedback-prize-english-language-learning-fluency",
+        "srky/ICNALE_writing_score",  # Asian college learners, CEFR-banded
     }
 )
 
@@ -133,6 +150,30 @@ def _cefr_b2_plus(row: dict[str, Any]) -> bool:
     writing. The cost is real: this keeps roughly 1,100 of the 3,000 essays.
     """
     band = str(row.get("cefr") or row.get("cefr_level") or "").strip().upper()
+    return band.startswith(("B2", "C1", "C2"))
+
+
+def _ellipse_competent(row: dict[str, Any]) -> bool:
+    """ELLIPSE rates six dimensions 1-5; ``mss`` is their mean.
+
+    3.0 is the rubric's "adequate command", the closest thing it has to the
+    B2 line, and it keeps 2,130 of 3,911 essays. Going to 3.5 would leave 822
+    and put the partition back under the §2.1 floor, which is the trade this
+    threshold exists to avoid.
+    """
+    try:
+        return float(row["mss"]) >= 3.0
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _icnale_b2_plus(row: dict[str, Any]) -> bool:
+    """ICNALE bands look like ``B1_2``; ``ENS`` marks native-speaker controls.
+
+    Excluding ENS is the point: 23 of the 800 essays are native writing, and
+    they would be indistinguishable in the partition once the label is gone.
+    """
+    band = str(row.get("L2 Proficiency") or "").strip().upper()
     return band.startswith(("B2", "C1", "C2"))
 
 
@@ -222,7 +263,9 @@ SOURCES: dict[Genre, list[SourceSpec]] = {
             license="MIT (collection); Reddit text per author",
         ),
     ],
-    # Deliberately un-backstopped -- see the module docstring.
+    # Three corpora, unioned rather than chosen between: W&I alone yields 1,239
+    # competent essays against a §2.1 floor of 3,000. Together they reach
+    # ~3,572 without relaxing what "competent" means. See resolve_all.
     Genre.non_native: [
         SourceSpec(
             hf_id="martinsr/wi_locness",
@@ -232,7 +275,31 @@ SOURCES: dict[Genre, list[SourceSpec]] = {
             license="Cambridge English / non-commercial research",
             filter_fn=_cefr_b2_plus,
             note="mirror of the W&I half of BEA-2019; the original id is script-based "
-            "and unloadable. The 'wi' config excludes native-speaker LOCNESS.",
+            "and unloadable. The 'wi' config excludes native-speaker LOCNESS. "
+            "~1,239 essays at B2+.",
+        ),
+        SourceSpec(
+            hf_id="tcapelle/feedback-prize-english-language-learning-fluency",
+            config=None,
+            split="train",
+            text_field="full_text",
+            license="CC-BY-4.0 (Kaggle Feedback Prize ELL / ELLIPSE)",
+            filter_fn=_ellipse_competent,
+            note="ELLIPSE: 3,911 essays by US school English Language Learners, "
+            "median 402 words. ~2,130 at mss>=3.0.",
+        ),
+        SourceSpec(
+            hf_id="srky/ICNALE_writing_score",
+            config=None,
+            split="train",
+            # OriginalText, never EditedText: the edited column is corrected
+            # prose, which is precisely the learner signal we are sampling.
+            text_field="OriginalText",
+            license="ICNALE / research use",
+            filter_fn=_icnale_b2_plus,
+            note="Asian college learners. ~203 at B2. Small, but a different L1 "
+            "mix from the other two, which matters for a partition meant to "
+            "cover non-native writing rather than one country's learners.",
         ),
     ],
 }
@@ -242,11 +309,6 @@ SOURCES: dict[Genre, list[SourceSpec]] = {
 #: than left to emerge from the table, so that a chain of length one is always
 #: a decision someone made and can be reviewed.
 UNBACKSTOPPED: dict[Genre, str] = {
-    Genre.non_native: (
-        "every plausible substitute is a native-speaker corpus; filling the "
-        "§2.2-mandatory partition with native prose would pass the Phase-1 gate "
-        "while measuring nothing, so exhaustion must raise"
-    ),
     Genre.academic_humanities: (
         "no second open corpus of humanities scholarship exists at this scale -- "
         "those journals are not open-access. The alternatives on the Hub are "
@@ -293,6 +355,26 @@ def probe(spec: SourceSpec) -> bool:
         )
         return False
     return True
+
+
+def resolve_all(genre: Genre) -> list[SourceSpec]:
+    """Every usable candidate for ``genre``, in priority order.
+
+    ``resolve`` picks the single best-fitting source; this is for the builder,
+    which needs *volume*. The non-native partition is the case that forced it:
+    no single loadable learner corpus reaches the §2.1 floor of 3,000
+    documents, but three of them together do, and unioning corpora with
+    different L1 mixes is a better partition than one corpus stretched by
+    lowering the proficiency bar.
+
+    Raises :class:`NoSourceAvailable` if nothing is usable, so a genre cannot
+    silently contribute zero documents to the corpus.
+    """
+    usable = [s for s in SOURCES[genre] if probe(s)]
+    if not usable:
+        tried = ", ".join(s.hf_id for s in SOURCES[genre])
+        raise NoSourceAvailable(f"no usable source for {genre}; tried: {tried}")
+    return usable
 
 
 def resolve(genre: Genre) -> SourceSpec:

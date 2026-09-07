@@ -21,12 +21,14 @@ from humanizer.core.config import MANDATORY_GENRES, Genre
 from humanizer.data import sources
 from humanizer.data.sources import (
     KNOWN_SYNTHETIC,
+    LEARNER_CORPORA,
     SOURCES,
     UNBACKSTOPPED,
     VERIFIED_LOADABLE,
     NoSourceAvailable,
     SourceSpec,
     resolve,
+    resolve_all,
 )
 
 
@@ -116,9 +118,58 @@ def test_single_candidate_genres_are_all_declared_and_explained():
         assert len(why) > 40, f"{g} has no real explanation"
 
 
-def test_every_mandatory_genre_is_allowed_to_fail_loudly():
-    """Mandatory partitions must never fall back; a substitute would hide them."""
-    assert set(MANDATORY_GENRES) <= set(UNBACKSTOPPED)
+def test_mandatory_genres_draw_only_from_vetted_corpora():
+    """The guard that replaced "never fall back".
+
+    non_native now has three candidates, so exhaustion is no longer what
+    protects it. What protects it is that every candidate is a corpus vetted
+    as non-native writing -- a property of how the data was collected, which
+    no test can read off the rows, hence the allowlist.
+    """
+    for g in MANDATORY_GENRES:
+        for spec in SOURCES[g]:
+            assert spec.hf_id in LEARNER_CORPORA, (
+                f"{spec.hf_id} is not vetted as non-native writing"
+            )
+
+
+def test_the_ellipse_gate_tracks_the_rubric_not_the_document_count():
+    keep = sources._ellipse_competent
+    assert keep({"mss": "3.0"}) and keep({"mss": 4.25})
+    assert not keep({"mss": "2.9"})
+    assert not keep({}) and not keep({"mss": None}) and not keep({"mss": "n/a"})
+
+
+def test_the_icnale_gate_excludes_the_native_speaker_controls():
+    keep = sources._icnale_b2_plus
+    assert keep({"L2 Proficiency": "B2_0"})
+    assert not keep({"L2 Proficiency": "B1_2"}) and not keep({"L2 Proficiency": "A2_0"})
+    assert not keep({"L2 Proficiency": "ENS"}), "ENS is the native-speaker control group"
+
+
+def test_icnale_uses_the_unedited_learner_text():
+    """EditedText is corrected prose -- the learner signal removed."""
+    spec = next(s for s in SOURCES[Genre.non_native] if "ICNALE" in s.hf_id)
+    assert spec.text_field == "OriginalText"
+
+
+def test_resolve_all_returns_every_usable_candidate(monkeypatch):
+    monkeypatch.setattr(sources, "probe", lambda s: True)
+    assert resolve_all(Genre.non_native) == SOURCES[Genre.non_native]
+
+
+def test_resolve_all_skips_the_unusable_ones(monkeypatch):
+    dead = SOURCES[Genre.non_native][1].hf_id
+    monkeypatch.setattr(sources, "probe", lambda s: s.hf_id != dead)
+    got = [s.hf_id for s in resolve_all(Genre.non_native)]
+    assert dead not in got and len(got) == len(SOURCES[Genre.non_native]) - 1
+
+
+def test_resolve_all_raises_rather_than_returning_an_empty_genre(monkeypatch):
+    """A genre contributing zero documents must not look like success."""
+    monkeypatch.setattr(sources, "probe", lambda s: False)
+    with pytest.raises(NoSourceAvailable):
+        resolve_all(Genre.non_native)
 
 
 # --- spec hygiene -----------------------------------------------------------
@@ -178,3 +229,32 @@ def test_probe_rejects_a_source_whose_text_field_is_wrong():
     bad = SourceSpec(**{**{f: getattr(good, f) for f in good.__slots__},
                         "text_field": "no_such_column"})
     assert not sources.probe(bad)
+
+
+@pytest.mark.slow
+def test_the_non_native_partition_clears_the_corpus_floor():
+    """The §2.1 floor is why this genre has three sources instead of one.
+
+    W&I alone yields 1,237 competent essays against a floor of 3,000. The
+    tempting fix was to drop the gate to B1, which would have filled the
+    partition with intermediate writing whose statistics differ from native
+    prose far more than machine text does -- a partition that separates on
+    fluency and answers no question worth asking. Three corpora unioned reach
+    the floor with the B2+ definition intact, so that is what this asserts.
+    """
+    from datasets import get_dataset_split_names, load_dataset
+
+    from humanizer.core.config import Config
+
+    total = 0
+    for spec in resolve_all(Genre.non_native):
+        for split in get_dataset_split_names(spec.hf_id, spec.config):
+            for row in load_dataset(spec.hf_id, spec.config, split=split):
+                if spec.filter_fn and not spec.filter_fn(row):
+                    continue
+                if len((row[spec.text_field] or "").split()) >= 50:
+                    total += 1
+    assert total >= Config().min_docs_per_genre, (
+        f"non_native yields {total}; the partition is §2.2-mandatory and "
+        "Phase 1's gate, so this is a build blocker, not a warning"
+    )
