@@ -86,7 +86,7 @@ tests/                      mirrors the package; test_model_roles.py, test_panel
 **Interfaces:**
 - Produces: importable `humanizer` package; `make test` runs pytest; `.venv/bin/python` with system site-packages.
 
-- [ ] **Step 1: Create the venv reusing installed torch**
+- [x] **Step 1: Create the venv reusing installed torch**
 
 ```bash
 python3 -m venv --system-site-packages .venv
@@ -97,7 +97,7 @@ python3 -m venv --system-site-packages .venv
 
 Rationale: `--system-site-packages` reuses the 2.6 GB torch/transformers install rather than duplicating it against a 24 GB disk budget.
 
-- [ ] **Step 2: Write `pyproject.toml`**
+- [x] **Step 2: Write `pyproject.toml`**
 
 ```toml
 [project]
@@ -111,7 +111,7 @@ markers = ["slow: needs model downloads or >30s", "final: requires --final-evalu
 addopts = "-m 'not slow' -q"
 ```
 
-- [ ] **Step 3: Write the smoke test**
+- [x] **Step 3: Write the smoke test**
 
 ```python
 def test_package_imports():
@@ -123,8 +123,8 @@ def test_mps_available():
     assert torch.backends.mps.is_available()
 ```
 
-- [ ] **Step 4: Run `make test`; expect FAIL (no `__version__`), then add it and re-run to PASS.**
-- [ ] **Step 5: Commit** — `git commit -m "chore: project skeleton, venv, pytest config"`
+- [x] **Step 4: Run `make test`; expect FAIL (no `__version__`), then add it and re-run to PASS.**
+- [x] **Step 5: Commit** — `git commit -m "chore: project skeleton, venv, pytest config"`
 
 ---
 
@@ -137,7 +137,7 @@ def test_mps_available():
 **Interfaces:**
 - Produces: `Genre` (StrEnum: `academic_stem`, `academic_humanities`, `technical_doc`, `journalistic`, `casual`, `non_native`); `Config` frozen dataclass with `.load(path) -> Config`; fields `tau_sem=0.85`, `tau_register=0.80`, `lambda_div`, `beam_width=5`, `n_candidates=12`, `max_iterations`, `paths`, `models`.
 
-- [ ] **Step 1: Test that genre membership is closed and non_native is mandatory**
+- [x] **Step 1: Test that genre membership is closed and non_native is mandatory**
 
 ```python
 def test_non_native_partition_is_mandatory():
@@ -150,7 +150,7 @@ def test_config_defaults_match_spec():
     assert cfg.beam_width == 5 and 8 <= cfg.n_candidates <= 16   # §4.2, §4.5
 ```
 
-- [ ] **Step 2: Run — FAIL. Step 3: implement. Step 4: PASS. Step 5: commit.**
+- [x] **Step 2: Run — FAIL. Step 3: implement. Step 4: PASS. Step 5: commit.**
 
 ---
 
@@ -162,7 +162,7 @@ def test_config_defaults_match_spec():
 - Produces: `Cache(root: Path)` with `get(key: str) -> Any | None`, `put(key, value)`, `key(*parts) -> str` (SHA-256 of the joined repr), `cached(namespace)` decorator, and `stats() -> CacheStats(hits, misses, bytes)`.
 - Numpy arrays are stored as `.npz` alongside a JSON sidecar; everything else as JSON.
 
-- [ ] **Step 1: Tests**
+- [x] **Step 1: Tests**
 
 ```python
 def test_key_is_content_addressed(tmp_path):
@@ -188,7 +188,7 @@ def test_decorator_counts_hits(tmp_path):
     assert calls == [3] and c.stats().hits == 1
 ```
 
-- [ ] **Steps 2-5: red, implement, green, commit.**
+- [x] **Steps 2-5: red, implement, green, commit.**
 
 ---
 
@@ -220,7 +220,7 @@ REGISTRY = {
 }
 ```
 
-- [ ] **Step 1: The role-separation test — this is a build gate, not a nicety**
+- [x] **Step 1: The role-separation test — this is a build gate, not a nicety**
 
 ```python
 CONFLICTING = [  # (role_a, role_b) pairs that must not share a model id
@@ -244,7 +244,7 @@ def test_fluency_and_distribution_ref_may_share():
     assert set(REGISTRY[ModelRole.fluency]) & set(REGISTRY[ModelRole.distribution_ref])
 ```
 
-- [ ] **Step 2: ModelManager tests**
+- [x] **Step 2: ModelManager tests**
 
 ```python
 def test_lru_evicts_beyond_cap(monkeypatch):
@@ -263,7 +263,7 @@ def test_disk_guard_raises_over_budget(tmp_path):
         g.check(2000)
 ```
 
-- [ ] **Steps 3-5: implement (`torch.device("mps")`, `dtype=torch.float16` for causal LMs, `float32` for classifiers — MPS fp16 softmax is unreliable in some classifier heads), green, commit.**
+- [x] **Steps 3-5: implement (`torch.device("mps")`, `dtype=torch.float16` for causal LMs, `float32` for classifiers — MPS fp16 softmax is unreliable in some classifier heads), green, commit.**
 
 ---
 
@@ -281,7 +281,7 @@ def test_disk_guard_raises_over_budget(tmp_path):
   Fast-DetectGPT's analytic curvature estimate needs.
 - Consumed by: `detectors/curvature.py`, `detectors/likelihood.py`, `distribution/features.py`, `transform/constrain.py`.
 
-- [ ] **Step 1: Tests**
+- [x] **Step 1: Tests**
 
 ```python
 @pytest.mark.slow
@@ -307,7 +307,7 @@ def test_long_text_is_windowed(lps):
     assert ts.n_tokens > 2000
 ```
 
-- [ ] **Steps 2-5.** Note: logprobs are for positions `1..n` (predicting token `i` from prefix `<i`); off-by-one here silently corrupts every downstream detector, so the shape test above is load-bearing.
+- [x] **Steps 2-5.** Note: logprobs are for positions `1..n` (predicting token `i` from prefix `<i`); off-by-one here silently corrupts every downstream detector, so the shape test above is load-bearing.
 
 ---
 
@@ -324,7 +324,7 @@ def test_long_text_is_windowed(lps):
 
 Verified-reachable ids (2026-09-04): `Hello-SimpleAI/HC3`, `liamdugan/raid`, `yaful/MAGE`, `wi_locness`, `abisee/cnn_dailymail`, `EdinburghNLP/xsum`, `armanc/scientific_papers`, `ccdv/arxiv-summarization`, `sentence-transformers/eli5`, `euclaise/writingprompts`. **M4 is unavailable** — every id 401s; MAGE + RAID cover its role.
 
-- [ ] **Step 1: Tests**
+- [x] **Step 1: Tests**
 
 ```python
 def test_every_genre_has_at_least_one_source():
@@ -341,7 +341,7 @@ def test_resolve_raises_when_all_unavailable(monkeypatch):
         resolve(Genre.non_native)
 ```
 
-- [ ] **Steps 2-5.**
+- [x] **Steps 2-5.**
 
 ---
 
