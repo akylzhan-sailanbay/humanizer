@@ -258,3 +258,55 @@ def test_the_non_native_partition_clears_the_corpus_floor():
         f"non_native yields {total}; the partition is §2.2-mandatory and "
         "Phase 1's gate, so this is a build blocker, not a warning"
     )
+
+
+# --- transient failures vs dead datasets ------------------------------------
+#
+# A 50k-document build runs for hours and will meet a DNS blip. Treating that
+# blip as "this dataset is gone" loses a source for the whole run and reports a
+# cause that is not the cause -- the exact confusion probe()'s docstring warned
+# about, observed for real on the first live build.
+
+
+class _Flaky:
+    def __init__(self, fails, exc):
+        self.left, self.exc, self.calls = fails, exc, 0
+
+    def __call__(self, spec):
+        self.calls += 1
+        if self.left > 0:
+            self.left -= 1
+            raise self.exc
+        return {spec.text_field: "ok"}
+
+
+def test_probe_retries_a_transient_failure_and_then_succeeds(monkeypatch):
+    flaky = _Flaky(2, OSError("[Errno 8] nodename nor servname provided, or not known"))
+    monkeypatch.setattr(sources, "_first_row", flaky)
+    assert sources.probe(SOURCES[Genre.casual][0], backoff=0) is True
+    assert flaky.calls == 3
+
+
+def test_probe_gives_up_after_the_retry_budget(monkeypatch):
+    flaky = _Flaky(99, ConnectionError("connection reset by peer"))
+    monkeypatch.setattr(sources, "_first_row", flaky)
+    assert sources.probe(SOURCES[Genre.casual][0], retries=2, backoff=0) is False
+    assert flaky.calls == 3
+
+
+def test_probe_does_not_retry_a_dataset_that_is_actually_dead(monkeypatch):
+    """Retrying a script-based or gated dataset just wastes the build's time."""
+    flaky = _Flaky(99, RuntimeError("Dataset scripts are no longer supported, but found x.py"))
+    monkeypatch.setattr(sources, "_first_row", flaky)
+    assert sources.probe(SOURCES[Genre.casual][0], retries=3, backoff=0) is False
+    assert flaky.calls == 1
+
+
+def test_exhaustion_says_the_network_was_the_problem(monkeypatch):
+    """"Everything fell through" and "the network was down" must not read alike."""
+    monkeypatch.setattr(sources, "_first_row",
+                        _Flaky(99, OSError("Temporary failure in name resolution")))
+    monkeypatch.setattr(sources, "PROBE_BACKOFF", 0)
+    with pytest.raises(NoSourceAvailable) as e:
+        resolve_all(Genre.journalistic)
+    assert "name resolution" in str(e.value)

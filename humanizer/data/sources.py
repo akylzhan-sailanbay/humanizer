@@ -27,8 +27,9 @@ nothing.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from ..core.config import Genre
 
@@ -103,6 +104,10 @@ class SourceSpec:
     #: Path (or glob) under the Hub's ``refs/convert/parquet`` branch. Set only
     #: for script-based datasets, which cannot be loaded any other way.
     parquet_glob: str | None = None
+    #: The text column is HTML. The builder strips it, dropping <code> and <pre>
+    #: outright -- StackOverflow posts are half source code, and code token
+    #: statistics would swamp the prose the genre is supposed to represent.
+    is_html: bool = False
     note: str = ""
 
     def __hash__(self) -> int:
@@ -221,7 +226,8 @@ SOURCES: dict[Genre, list[SourceSpec]] = {
             split="train",
             text_field="Body",
             license="CC-BY-SA-4.0",
-            note="Body is HTML; strip tags before use",
+            is_html=True,
+            note="Body is HTML; code blocks are dropped, not unwrapped",
         ),
         SourceSpec(
             hf_id="pacovaldez/stackoverflow-questions",
@@ -229,6 +235,7 @@ SOURCES: dict[Genre, list[SourceSpec]] = {
             split="train",
             text_field="body",
             license="CC-BY-SA-4.0",
+            is_html=True,
         ),
     ],
     Genre.journalistic: [
@@ -322,39 +329,112 @@ class NoSourceAvailable(RuntimeError):
     """Every candidate for a genre failed its probe."""
 
 
-def probe(spec: SourceSpec) -> bool:
+#: Extra attempts a *transient* probe failure earns. A 50k-document build runs
+#: for hours and will meet a DNS blip; writing a source off for the whole run
+#: because of one is expensive and, worse, reports the wrong cause.
+PROBE_RETRIES = 2
+PROBE_BACKOFF = 1.5  # seconds, doubled per attempt
+
+#: Exception names meaning "the network misbehaved", not "the dataset is wrong".
+#: Matched by name because the HTTP stack raises from several libraries.
+_TRANSIENT_TYPES = frozenset({
+    "ConnectionError", "ConnectTimeout", "ReadTimeout", "Timeout", "SSLError",
+    "ProxyError", "ChunkedEncodingError", "IncompleteRead", "ProtocolError",
+    "RemoteDisconnected", "HfHubHTTPError",
+})
+_TRANSIENT_MARKERS = (
+    "nodename nor servname", "temporary failure in name resolution",
+    "connection reset", "connection aborted", "connection refused",
+    "timed out", "max retries exceeded", "remote end closed",
+    "client has been closed", "bad gateway", "service unavailable",
+)
+
+#: Why each id last failed, so an exhausted chain can say what actually went wrong.
+_LAST_FAILURE: dict[str, str] = {}
+
+
+def _is_transient(exc: BaseException) -> bool:
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, (ConnectionError, TimeoutError)):
+            return True
+        if type(cur).__name__ in _TRANSIENT_TYPES:
+            return True
+        if any(m in str(cur).lower() for m in _TRANSIENT_MARKERS):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
+def _first_row(spec: SourceSpec) -> dict[str, Any]:
+    from datasets import load_dataset
+
+    return next(iter(load_dataset(streaming=True, **spec.load_kwargs())))
+
+
+def last_failure(hf_id: str) -> str | None:
+    """Why ``hf_id`` last failed a probe, if it did."""
+    return _LAST_FAILURE.get(hf_id)
+
+
+def probe(
+    spec: SourceSpec, *, retries: int | None = None, backoff: float | None = None
+) -> bool:
     """Can we actually read a usable row out of this source, right now?
 
-    Deliberately not ``HfApi().dataset_info``: every one of the four dead ids
-    above passes that check. Streaming one row exercises the loader, the
-    config name, the parquet branch and gating in a single call, and the
-    ``text_field`` check catches the renamed-column failure that would
-    otherwise surface as an empty corpus.
+    Deliberately not ``HfApi().dataset_info``: every one of the dead ids above
+    passes that check. Streaming one row exercises the loader, the config name,
+    the parquet branch and gating in one call, and the ``text_field`` check
+    catches the renamed-column failure that would otherwise surface as an empty
+    corpus rather than as an error.
 
-    Any failure is a ``False`` — a 401, a 404 and a dropped connection all
-    mean "cannot build from this", and the caller's response to each is to try
-    the next candidate. The reason is logged rather than raised, because a
-    six-genre build should not die on one flaky lookup, but it *is* logged:
-    "everything fell through" and "the network was down" are otherwise
-    indistinguishable afterwards.
+    Failures are still a ``False`` — the caller's response to a 401, a 404 and a
+    dropped connection is the same, try the next candidate — but they are no
+    longer treated alike. A transient failure is retried before the source is
+    written off, and the reason is recorded, so an exhausted chain can say
+    whether the datasets were dead or the network was. The first live build
+    died on a DNS blip reported as "no usable source", which is the confusion
+    this exists to prevent.
     """
-    try:
-        from datasets import load_dataset
+    retries = PROBE_RETRIES if retries is None else retries
+    backoff = PROBE_BACKOFF if backoff is None else backoff
 
-        row = next(iter(load_dataset(streaming=True, **spec.load_kwargs())))
-    except Exception as exc:  # noqa: BLE001 -- see docstring
-        log.warning("probe failed for %s: %s: %s", spec.hf_id, type(exc).__name__, exc)
-        return False
+    for attempt in range(retries + 1):
+        try:
+            row = _first_row(spec)
+        except Exception as exc:  # noqa: BLE001 -- see docstring
+            _LAST_FAILURE[spec.hf_id] = f"{type(exc).__name__}: {exc}"
+            if _is_transient(exc) and attempt < retries:
+                wait = backoff * (2**attempt)
+                log.warning(
+                    "probe for %s hit a transient failure (%s); retrying in %.1fs",
+                    spec.hf_id, type(exc).__name__, wait,
+                )
+                if wait:
+                    time.sleep(wait)
+                continue
+            log.warning("probe failed for %s: %s: %s", spec.hf_id, type(exc).__name__, exc)
+            return False
 
-    if spec.text_field not in row:
-        log.warning(
-            "%s loaded but declares text_field=%r; row has %s",
-            spec.hf_id,
-            spec.text_field,
-            sorted(row)[:12],
-        )
-        return False
-    return True
+        if spec.text_field not in row:
+            _LAST_FAILURE[spec.hf_id] = (
+                f"loaded, but declares text_field={spec.text_field!r}; "
+                f"row has {sorted(row)[:12]}"
+            )
+            log.warning("%s: %s", spec.hf_id, _LAST_FAILURE[spec.hf_id])
+            return False
+
+        _LAST_FAILURE.pop(spec.hf_id, None)
+        return True
+    return False
+
+
+def _why_failed(specs: Sequence[SourceSpec]) -> str:
+    return "; ".join(
+        f"{s.hf_id} ({_LAST_FAILURE.get(s.hf_id, 'no reason recorded')})" for s in specs
+    )
 
 
 def resolve_all(genre: Genre) -> list[SourceSpec]:
@@ -372,8 +452,9 @@ def resolve_all(genre: Genre) -> list[SourceSpec]:
     """
     usable = [s for s in SOURCES[genre] if probe(s)]
     if not usable:
-        tried = ", ".join(s.hf_id for s in SOURCES[genre])
-        raise NoSourceAvailable(f"no usable source for {genre}; tried: {tried}")
+        raise NoSourceAvailable(
+            f"no usable source for {genre}; tried: {_why_failed(SOURCES[genre])}"
+        )
     return usable
 
 
@@ -388,8 +469,7 @@ def resolve(genre: Genre) -> SourceSpec:
         if probe(spec):
             return spec
         log.info("%s: %s unusable, trying next", genre, spec.hf_id)
-    tried = ", ".join(s.hf_id for s in candidates)
     raise NoSourceAvailable(
-        f"no usable source for {genre}; tried: {tried}. "
+        f"no usable source for {genre}; tried: {_why_failed(candidates)}. "
         "Add a candidate to SOURCES, or check network/auth."
     )
