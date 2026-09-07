@@ -352,7 +352,7 @@ def test_resolve_raises_when_all_unavailable(monkeypatch):
 **Interfaces:**
 - Produces: `build_ref_human(cfg) -> Path` writing `data/splits/ref_human.jsonl` with records `{id, text, genre, source, n_words, is_human: True}`; target 50,000 documents, genre-balanced with a floor of 3,000 per genre; deterministic under `cfg.seed`.
 
-- [ ] **Step 1: Tests**
+- [x] **Step 1: Tests**
 
 ```python
 def test_records_carry_genre_and_are_human(tiny_ref):
@@ -372,7 +372,7 @@ def test_manifest_records_what_actually_loaded(tiny_ref_manifest):
     assert all(v["n_docs"] > 0 for v in tiny_ref_manifest["resolved"].values())
 ```
 
-- [ ] **Steps 2-5. Then run the real build in the background** (`make ref-human`), since it is I/O-bound and slow.
+- [x] **Steps 2-5. Then run the real build in the background** (`make ref-human`), since it is I/O-bound and slow.
 
 ---
 
