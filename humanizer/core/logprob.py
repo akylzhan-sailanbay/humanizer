@@ -144,11 +144,13 @@ def stats_from_logits(logits: torch.Tensor, token_ids: torch.Tensor) -> TokenSta
 
         parts.append(
             (
-                observed.double().cpu().numpy(),
+                # .cpu() *before* .double(): MPS has no float64, so casting
+                # on-device raises. CPU-only tests cannot catch this.
+                observed.cpu().double().numpy(),
                 ranks.cpu().numpy().astype(np.int64),
-                (-cond_mean).double().cpu().numpy(),
-                cond_mean.double().cpu().numpy(),
-                cond_var.double().cpu().numpy(),
+                (-cond_mean).cpu().double().numpy(),
+                cond_mean.cpu().double().numpy(),
+                cond_var.cpu().double().numpy(),
             )
         )
 
